@@ -54,6 +54,13 @@ class AdblockRule(object):
     True
     """
 
+    HTML_SEPARATORS = [
+        "#@#",
+        "#?#",
+        "#$#",
+        "##",
+    ]
+
     BINARY_OPTIONS = [
         "script",
         "image",
@@ -76,45 +83,66 @@ class AdblockRule(object):
         "donottrack",
         "websocket",
     ]
-    OPTIONS_SPLIT_PAT = ',(?=~?(?:%s))' % ('|'.join(BINARY_OPTIONS + ["domain"]))
+    OPTIONS_SPLIT_PAT = ",(?=~?(?:%s))" % ("|".join(BINARY_OPTIONS + ["domain"]))
     OPTIONS_SPLIT_RE = re.compile(OPTIONS_SPLIT_PAT)
 
-    __slots__ = ['raw_rule_text', 'is_comment', 'is_html_rule', 'is_exception',
-                 'raw_options', 'options', '_options_keys', 'rule_text',
-                 'regex', 'regex_re']
+    __slots__ = [
+        "raw_rule_text",
+        "is_comment",
+        "is_exception",
+        "is_html_rule",
+        "html_domains",
+        "html_separator",
+        "html_selector",
+        "raw_options",
+        "options",
+        "_options_keys",
+        "rule_text",
+        "regex",
+        "regex_re",
+    ]
 
     def __init__(self, rule_text):
         self.raw_rule_text = rule_text
         self.regex_re = None
 
         rule_text = rule_text.strip()
-        self.is_comment = not rule_text or rule_text.startswith(('!', '[Adblock'))
+        self.is_comment = not rule_text or rule_text.startswith(("!", "[Adblock"))
         if self.is_comment:
             self.is_html_rule = self.is_exception = False
         else:
-            self.is_html_rule = '##' in rule_text or '#@#' in rule_text  # or rule_text.startswith('#')
-            self.is_exception = rule_text.startswith('@@')
-            if self.is_exception:
+            seps = [sep for sep in self.HTML_SEPARATORS if sep in rule_text]
+            self.html_separator = "" if not seps else seps[0]
+            self.is_html_rule = self.html_separator != ""
+            self.is_exception = (
+                rule_text.startswith("@@") or self.html_separator == "#@#"
+            )
+            if self.is_exception and not self.is_html_rule:
                 rule_text = rule_text[2:]
 
-        if not self.is_comment and '$' in rule_text:
-            rule_text, options_text = rule_text.split('$', 1)
+        if not self.is_comment and not self.is_html_rule and "$" in rule_text:
+            rule_text, options_text = rule_text.split("$", 1)
             self.raw_options = self._split_options(options_text)
             self.options = dict(self._parse_option(opt) for opt in self.raw_options)
         else:
             self.raw_options = []
             self.options = {}
-        self._options_keys = frozenset(self.options.keys()) - set(['match-case'])
+        self._options_keys = frozenset(self.options.keys()) - set(["match-case"])
 
         self.rule_text = rule_text
 
         if self.is_comment or self.is_html_rule:
-            # TODO: add support for HTML rules.
-            # We should split the rule into URL and HTML parts,
-            # convert URL part to a regex and parse the HTML part.
-            self.regex = ''
+            self.regex = ""
         else:
             self.regex = self.rule_to_regex(rule_text)
+
+        if self.is_html_rule:
+            domains, selector = self.rule_text.split(self.html_separator, 1)
+            self.html_domains = [] if not domains else domains.split(",")
+            self.html_selector = selector
+        else:
+            self.html_domains = []
+            self.html_selector = ""
 
     def match_url(self, url, options=None):
         """
@@ -125,14 +153,14 @@ class AdblockRule(object):
         """
         options = options or {}
         for optname in self.options:
-            if optname == 'match-case':  # TODO
+            if optname == "match-case":  # TODO
                 continue
 
             if optname not in options:
                 raise ValueError("Rule requires option %s" % optname)
 
-            if optname == 'domain':
-                if not self._domain_matches(options['domain']):
+            if optname == "domain":
+                if not self._domain_matches(options["domain"]):
                     return False
                 continue
 
@@ -142,7 +170,7 @@ class AdblockRule(object):
         return self._url_matches(url)
 
     def _domain_matches(self, domain):
-        domain_rules = self.options['domain']
+        domain_rules = self.options["domain"]
         for domain in _domain_variants(domain):
             if domain in domain_rules:
                 return domain_rules[domain]
@@ -203,13 +231,13 @@ class AdblockRule(object):
 
     @classmethod
     def _parse_domain_option(cls, text):
-        domains = text[len('domain='):]
-        parts = domains.replace(',', '|').split('|')
+        domains = text[len("domain=") :]
+        parts = domains.replace(",", "|").split("|")
         return dict(cls._parse_option_negation(p) for p in parts)
 
     @classmethod
     def _parse_option_negation(cls, text):
-        return (text.lstrip('~'), not text.startswith('~'))
+        return (text.lstrip("~"), not text.startswith("~"))
 
     @classmethod
     def _parse_option(cls, text):
@@ -226,11 +254,11 @@ class AdblockRule(object):
             return rule
 
         # Check if the rule isn't already regexp
-        if rule.startswith('/') and rule.endswith('/'):
+        if rule.startswith("/") and rule.endswith("/"):
             if len(rule) > 1:
                 rule = rule[1:-1]
             else:
-                raise AdblockParsingError('Invalid rule')
+                raise AdblockParsingError("Invalid rule")
             return rule
 
         # escape special regex characters
@@ -244,17 +272,17 @@ class AdblockRule(object):
         # Separator character ^ matches anything but a letter, a digit, or
         # one of the following: _ - . %. The end of the address is also
         # accepted as separator.
-        rule = rule.replace("^", "(?:[^\w\d_\-.%]|$)")
+        rule = rule.replace("^", r"(?:[^\w\d_\-.%]|$)")
 
         # * symbol
         rule = rule.replace("*", ".*")
 
         # | in the end means the end of the address
-        if rule[-1] == '|':
-            rule = rule[:-1] + '$'
+        if rule[-1] == "|":
+            rule = rule[:-1] + "$"
 
         # || in the beginning means beginning of the domain name
-        if rule[:2] == '||':
+        if rule[:2] == "||":
             # XXX: it is better to use urlparse for such things,
             # but urlparse doesn't give us a single regex.
             # Regex is based on http://tools.ietf.org/html/rfc3986#appendix-B
@@ -263,13 +291,13 @@ class AdblockRule(object):
                 #          |  scheme    | of the domain     |
                 rule = r"^(?:[^:/?#]+:)?(?://(?:[^/?#]*\.)?)?" + rule[2:]
 
-        elif rule[0] == '|':
+        elif rule[0] == "|":
             # | in the beginning means start of the address
-            rule = '^' + rule[1:]
+            rule = "^" + rule[1:]
 
         # other | symbols should be escaped
         # we have "|$" in our regexp - do not touch it
-        rule = re.sub("(\|)[^$]", r"\|", rule)
+        rule = re.sub(r"(\|)[^$]", r"\|", rule)
 
         return rule
 
@@ -286,31 +314,43 @@ class AdblockRules(object):
     optimizes some common cases.
     """
 
-    def __init__(self, rules, supported_options=None, skip_unsupported_rules=True,
-                 use_re2='auto', max_mem=256*1024*1024, rule_cls=AdblockRule):
+    def __init__(
+        self,
+        rules,
+        supported_options=None,
+        skip_unsupported_rules=True,
+        use_re2="auto",
+        max_mem=256 * 1024 * 1024,
+        rule_cls=AdblockRule,
+    ):
 
         if supported_options is None:
-            self.supported_options = rule_cls.BINARY_OPTIONS + ['domain']
+            self.supported_options = rule_cls.BINARY_OPTIONS + ["domain"]
         else:
             self.supported_options = supported_options
 
-        self.uses_re2 = _is_re2_supported() if use_re2 == 'auto' else use_re2
+        self.uses_re2 = _is_re2_supported() if use_re2 == "auto" else use_re2
         self.re2_max_mem = max_mem
         self.rule_cls = rule_cls
         self.skip_unsupported_rules = skip_unsupported_rules
 
         _params = dict((opt, True) for opt in self.supported_options)
-        self.rules = [
-            r for r in (
-                r if isinstance(r, rule_cls) else rule_cls(r)
-                for r in rules
-            )
-            if (r.regex or r.options) and r.matching_supported(_params)
-        ]
+        self.url_rules = []
+        self.html_rules = []
+        for rule in rules:
+            if not isinstance(rule, rule_cls):
+                rule = rule_cls(rule)
+            if (rule.regex or rule.options) and rule.matching_supported(_params):
+                self.url_rules.append(rule)
+            # only support two kinds of html rule
+            if rule.is_html_rule and (
+                rule.html_separator == "##" or rule.html_separator == "#@#"
+            ):
+                self.html_rules.append(rule)
 
         # "advanced" rules are rules with options,
         # "basic" rules are rules without options
-        advanced_rules, basic_rules = split_data(self.rules, lambda r: r.options)
+        advanced_rules, basic_rules = split_data(self.url_rules, lambda r: r.options)
 
         # Rules with domain option are handled separately:
         # if user passes a domain we can discard all rules which
@@ -321,22 +361,39 @@ class AdblockRules(object):
         # TODO: what about ~rules? Should we match them earlier?
         domain_required_rules, non_domain_rules = split_data(
             advanced_rules,
-            lambda r: (
-                'domain' in r.options
-                and any(r.options["domain"].values())
-            )
+            lambda r: ("domain" in r.options and any(r.options["domain"].values())),
         )
 
-        # split rules into blacklists and whitelists
+        # split url rules into blacklists and whitelists
         self.blacklist, self.whitelist = self._split_bw(basic_rules)
         _combined = partial(_combined_regex, use_re2=self.uses_re2, max_mem=max_mem)
         self.blacklist_re = _combined([r.regex for r in self.blacklist])
         self.whitelist_re = _combined([r.regex for r in self.whitelist])
 
-        self.blacklist_with_options, self.whitelist_with_options = \
-            self._split_bw(non_domain_rules)
-        self.blacklist_require_domain, self.whitelist_require_domain = \
-            self._split_bw_domain(domain_required_rules)
+        self.blacklist_with_options, self.whitelist_with_options = self._split_bw(
+            non_domain_rules
+        )
+        (
+            self.blacklist_require_domain,
+            self.whitelist_require_domain,
+        ) = self._split_bw_domain(domain_required_rules)
+
+        # Rules with html selector are handled separately
+        white_html_rules, black_html_rules = split_data(
+            self.html_rules, lambda r: r.is_exception
+        )
+        self.black_domain_selectors = defaultdict(set)
+        self.white_domain_selectors = defaultdict(set)
+        self.wild_selectors = set()
+        for rule in black_html_rules:
+            if not rule.html_domains:
+                self.wild_selectors.add(rule.html_selector)
+                continue
+            for domain in rule.html_domains:
+                self.black_domain_selectors[domain].add(rule.html_selector)
+        for rule in white_html_rules:
+            for domain in rule.html_domains:
+                self.white_domain_selectors[domain].add(rule.html_selector)
 
     def should_block(self, url, options=None):
         # TODO: group rules with similar options and match them in bigger steps
@@ -347,24 +404,39 @@ class AdblockRules(object):
             return True
         return False
 
+    def find_selectors(self, domain, contain_wild_selectors=True):
+        selectors = set()
+        if contain_wild_selectors is True:
+            selectors = self.wild_selectors.copy()
+        for sub_domain in _domain_variants(domain):
+            if sub_domain in self.black_domain_selectors:
+                selectors |= self.black_domain_selectors[sub_domain]
+        for sub_domain in _domain_variants(domain):
+            if sub_domain in self.white_domain_selectors:
+                selectors -= self.white_domain_selectors[sub_domain]
+        return selectors
+
     def _is_whitelisted(self, url, options):
         return self._matches(
-            url, options,
+            url,
+            options,
             self.whitelist_re,
             self.whitelist_require_domain,
-            self.whitelist_with_options
+            self.whitelist_with_options,
         )
 
     def _is_blacklisted(self, url, options):
         return self._matches(
-            url, options,
+            url,
+            options,
             self.blacklist_re,
             self.blacklist_require_domain,
-            self.blacklist_with_options
+            self.blacklist_with_options,
         )
 
-    def _matches(self, url, options,
-                 general_re, domain_required_rules, rules_with_options):
+    def _matches(
+        self, url, options, general_re, domain_required_rules, rules_with_options
+    ):
         """
         Return if ``url``/``options`` are matched by rules defined by
         ``general_re``, ``domain_required_rules`` and ``rules_with_options``.
@@ -381,8 +453,8 @@ class AdblockRules(object):
             return True
 
         rules = []
-        if 'domain' in options and domain_required_rules:
-            src_domain = options['domain']
+        if "domain" in options and domain_required_rules:
+            src_domain = options["domain"]
             for domain in _domain_variants(src_domain):
                 if domain in domain_required_rules:
                     rules.extend(domain_required_rules[domain])
@@ -407,7 +479,7 @@ class AdblockRules(object):
     def _domain_index(cls, rules):
         result = defaultdict(list)
         for rule in rules:
-            domains = rule.options.get('domain', {})
+            domains = rule.options.get("domain", {})
             for domain, required in domains.items():
                 if required:
                     result[domain].append(rule)
@@ -423,7 +495,7 @@ def _domain_variants(domain):
     >>> list(_domain_variants("localhost"))
     ['localhost']
     """
-    parts = domain.split('.')
+    parts = domain.split(".")
     if len(parts) == 1:
         yield parts[0]
     else:
@@ -449,6 +521,7 @@ def _combined_regex(regexes, flags=re.IGNORECASE, use_re2=False, max_mem=None):
 
     if use_re2:
         import re2
+
         return re2.compile(joined_regexes, flags=flags, max_mem=max_mem)
     return re.compile(joined_regexes, flags=flags)
 
@@ -461,4 +534,4 @@ def _is_re2_supported():
 
     # re2.match doesn't work in re2 v0.2.20 installed from pypi
     # (it always returns None).
-    return re2.match('foo', 'foo') is not None
+    return re2.match("foo", "foo") is not None
